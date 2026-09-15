@@ -54,6 +54,16 @@ verify.sh                Automated gate checker (G1-G5) — the main deliverable
   bearing — see the schema comment and SPEC.md v2 item 2. If you add a new
   timestamp column that a watermark scan will compare against a JS `Date`
   round-tripped through Postgres, declare it `TIMESTAMPTZ(3)` too.
+- Every route in `services/api/src/index.js` goes through the `wrap()`
+  helper, not a bare `async (req, res) => {}`. Express 4 does not catch a
+  rejected promise from an async handler, and Node kills the process on an
+  unhandled rejection by default — an unwrapped route is one Postgres
+  hiccup away from taking down the whole API. See SPEC.md v5 item 1.
+- Both `services/pipeline/src/mq.js` and `services/consumer/src/index.js`
+  reconnect to RabbitMQ in-process with capped backoff on connection loss —
+  neither should go back to "throw and let the container restart." They
+  were inconsistent once (consumer used to crash-restart while the
+  pipeline reconnected in place); keep them matching. See SPEC.md v5 item 2.
 
 ## What not to touch without a good reason
 

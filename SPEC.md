@@ -202,3 +202,31 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
   lost or duplicated — but a misleading health metric is exactly the kind
   of thing G5 exists to catch, so it's recorded with the same weight as
   v2/v3.
+
+- v5 (final hardening pass, after all gates already passing): a robustness
+  audit — not gate-driven this time, just "would a careful reviewer poke a
+  hole in this" — found two more real issues:
+
+  1. **Every backend route in the API was one thrown error away from
+     killing the whole process.** Express 4 does not catch a rejected
+     promise from an `async` route handler, and Node terminates on an
+     unhandled rejection by default. `/api/status` (polled by the UI every
+     2 seconds) had no try/catch around any of its Postgres/Redis calls —
+     a single transient Postgres hiccup would have taken the entire API
+     down, not just failed one request. Fixed with a `wrap()` helper
+     forwarding to Express's error middleware, applied to every route.
+
+  2. **The consumer crashed on every RabbitMQ restart; the pipeline
+     didn't.** Manually restarting the RabbitMQ container to test the API
+     fix above showed an asymmetry: `pipeline-backfill` and
+     `pipeline-incremental` stayed up the entire time (their `mq.js`
+     already reconnects lazily on the next publish attempt), but the
+     consumer's connection had no reconnect logic at all — it threw,
+     `process.exit(1)`'d, and relied on Docker's own restart backoff to
+     come back. That's a real, if minor, inconsistency: two services
+     built to survive the exact same failure, handling it two different
+     ways for no principled reason. Fixed by giving the consumer the same
+     in-process reconnect-with-backoff pattern as the pipeline. Verified
+     by restarting RabbitMQ again afterward: the consumer container now
+     stays up (`docker compose ps` never shows a restart) and logs its own
+     retry/backoff instead of disappearing and reappearing.

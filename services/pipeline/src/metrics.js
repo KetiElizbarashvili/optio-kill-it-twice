@@ -38,19 +38,29 @@ function makeMetrics(mode) {
   }
 
   function startServer(port, healthCheckFn) {
+    // http.createServer doesn't await this callback, so a throw inside it
+    // (e.g. healthCheckFn rejecting unexpectedly) becomes an unhandled
+    // rejection — under Node's default that kills the whole worker over a
+    // single bad /health poll. The try/catch is what keeps a metrics-
+    // endpoint hiccup from taking down the pipeline it's reporting on.
     const server = http.createServer(async (req, res) => {
-      if (req.url === '/metrics') {
-        res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
-        res.end(prometheusText());
-      } else if (req.url === '/health') {
-        const h = await healthCheckFn();
-        res.writeHead(h.ok ? 200 : 503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(h));
-      } else if (req.url === '/status') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ mode, counters, gauges, throughput_rows_per_sec: throughput() }));
-      } else {
-        res.writeHead(404); res.end();
+      try {
+        if (req.url === '/metrics') {
+          res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4' });
+          res.end(prometheusText());
+        } else if (req.url === '/health') {
+          const h = await healthCheckFn();
+          res.writeHead(h.ok ? 200 : 503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(h));
+        } else if (req.url === '/status') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ mode, counters, gauges, throughput_rows_per_sec: throughput() }));
+        } else {
+          res.writeHead(404); res.end();
+        }
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: String(err.message || err) }));
       }
     });
     server.listen(port, () => console.log(`[${mode}] metrics/health on :${port}`));

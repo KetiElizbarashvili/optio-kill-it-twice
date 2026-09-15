@@ -20,17 +20,25 @@ async function fetchJson(url, timeoutMs = 3000) {
   }
 }
 
+// Express 4 does not catch a rejected promise from an async handler — it
+// becomes an unhandled rejection, and Node terminates the whole process on
+// those by default. Without this wrapper, a single transient Postgres
+// hiccup during a `/api/status` poll (the UI hits this every 2s) would
+// crash the entire API service, not just fail one request. Every route
+// below goes through this rather than relying on its own try/catch.
+const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/health', async (req, res) => {
+app.get('/health', wrap(async (req, res) => {
   let dbOk = true;
   try { await db.pool.query('SELECT 1'); } catch { dbOk = false; }
   res.json({ ok: dbOk, service: 'api' });
-});
+}));
 
-app.get('/api/status', async (req, res) => {
+app.get('/api/status', wrap(async (req, res) => {
   const [checkpoints, totalSource, maxIdVal, dlqPending, esHealth, mqHealth,
     backfillStats, incrementalStats, consumerStats, queueStats, dlqQueueStats,
     esDown, mqDown] = await Promise.all([
@@ -85,42 +93,38 @@ app.get('/api/status', async (req, res) => {
     chaos: { es_down: !!esDown, mq_down: !!mqDown },
     overall_health: computeOverallHealth(esHealth, mqHealth, backfillStats, incrementalStats) ? 'healthy' : 'degraded',
   });
-});
+}));
 
 function computeOverallHealth(esHealth, mqHealth, backfillStats, incrementalStats) {
   return esHealth.ok && mqHealth.ok && backfillStats !== null && incrementalStats !== null;
 }
 
-app.get('/api/records', async (req, res) => {
-  try {
-    const { q, status, country, page, limit } = req.query;
-    const result = await es.searchRecords({
-      q, status, country,
-      page: parseInt(page || '1', 10),
-      limit: Math.min(100, parseInt(limit || '25', 10)),
-    });
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: String(err.message || err) });
-  }
-});
+app.get('/api/records', wrap(async (req, res) => {
+  const { q, status, country, page, limit } = req.query;
+  const result = await es.searchRecords({
+    q, status, country,
+    page: parseInt(page || '1', 10),
+    limit: Math.min(100, parseInt(limit || '25', 10)),
+  });
+  res.json(result);
+}));
 
-app.get('/api/records/:id', async (req, res) => {
+app.get('/api/records/:id', wrap(async (req, res) => {
   const record = await es.getRecordById(req.params.id);
   if (!record) return res.status(404).json({ error: 'not found' });
   res.json(record);
-});
+}));
 
-app.get('/api/dlq', async (req, res) => {
+app.get('/api/dlq', wrap(async (req, res) => {
   const status = req.query.status || 'pending';
   const [rows, count] = await Promise.all([
     db.listDlq({ status, limit: parseInt(req.query.limit || '50', 10) }),
     db.countDlq(status),
   ]);
   res.json({ total: count, rows });
-});
+}));
 
-app.post('/api/dlq/:id/replay', async (req, res) => {
+app.post('/api/dlq/:id/replay', wrap(async (req, res) => {
   const dlqRow = await db.getDlqById(req.params.id);
   if (!dlqRow) return res.status(404).json({ error: 'not found' });
 
@@ -156,23 +160,23 @@ app.post('/api/dlq/:id/replay', async (req, res) => {
     await db.bumpDlqAttempt(dlqRow.id, err.message || err);
     res.status(500).json({ error: String(err.message || err) });
   }
-});
+}));
 
-app.post('/api/control/:mode/:action', async (req, res) => {
+app.post('/api/control/:mode/:action', wrap(async (req, res) => {
   const { mode, action } = req.params;
   if (!['backfill', 'incremental'].includes(mode)) return res.status(400).json({ error: 'bad mode' });
   if (!['pause', 'resume'].includes(action)) return res.status(400).json({ error: 'bad action' });
   await db.setCheckpointStatus(mode, action === 'pause' ? 'paused' : 'idle');
   res.json({ ok: true });
-});
+}));
 
-app.post('/api/simulate/corrupt', async (req, res) => {
+app.post('/api/simulate/corrupt', wrap(async (req, res) => {
   const count = parseInt(req.body?.count || '3', 10);
   const ids = await db.insertCorruptRows(count);
   res.json({ ok: true, ids });
-});
+}));
 
-app.post('/api/simulate/outage/:sink/:action', async (req, res) => {
+app.post('/api/simulate/outage/:sink/:action', wrap(async (req, res) => {
   const { sink, action } = req.params;
   if (!['elasticsearch', 'rabbitmq'].includes(sink)) return res.status(400).json({ error: 'bad sink' });
   if (!['start', 'stop'].includes(action)) return res.status(400).json({ error: 'bad action' });
@@ -180,6 +184,14 @@ app.post('/api/simulate/outage/:sink/:action', async (req, res) => {
   if (action === 'start') await redis.set(key, '1');
   else await redis.del(key);
   res.json({ ok: true, sink, active: action === 'start' });
+}));
+
+// Catches whatever `wrap` forwards via next(err) — keeps one bad request
+// from ever taking down the whole process.
+app.use((err, req, res, next) => {
+  console.error(`[api] ${req.method} ${req.path} error:`, err.message || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: String(err.message || err) });
 });
 
 app.listen(PORT, () => console.log(`[api] listening on :${PORT}`));

@@ -295,11 +295,12 @@ overhead at the cost of a bigger single unit of retry-on-failure.
 
 ## Where AI deviated from spec
 
-Four concrete, verified incidents — the required minimum was two; the other
-two showed up while building `verify.sh` and are included because they're
-the same category of mistake (something that looked right until it was
-actually run), just caught one layer up, in the test rather than the
-pipeline. Full technical detail also in SPEC.md's changelog (v2-v4), written
+Six concrete, verified incidents — the required minimum was two. The middle
+two showed up while building `verify.sh` (the same category of mistake,
+caught one layer up in the test rather than the pipeline); the last two
+showed up during a final robustness pass after every gate was already
+green, because "all gates pass" and "nothing else is wrong" are different
+claims. Full technical detail also in SPEC.md's changelog (v2-v5), written
 at the time each was found:
 
 **1. Infinite incremental-reprocessing loop from timestamp truncation.**
@@ -353,12 +354,33 @@ Caught by watching the number climb past 50s+ in `verify.sh` output on a
 worker that had already processed every row. Fixed to mean "age of the
 oldest *unprocessed* row," reading 0 when there's no backlog.
 
-All four were decisions once found (each fix follows directly from either
+**5. Every API route was one thrown error from killing the whole service.**
+Express 4 doesn't catch a rejected promise from an `async` handler, and
+Node terminates the process on an unhandled rejection by default.
+`/api/status` — polled by the UI every 2 seconds — had no try/catch around
+its Postgres/Redis calls, so a single transient DB hiccup would have taken
+the entire API down. Found during a final robustness pass (not gate-driven
+— just asking "what would a reviewer poke at"), fixed with a `wrap()`
+helper on every route forwarding to a single Express error-handling
+middleware.
+
+**6. The consumer crashed on every RabbitMQ restart; the pipeline didn't.**
+Restarting RabbitMQ to test #5's fix surfaced an asymmetry: the pipeline
+workers stayed up the whole time (their reconnect logic already handles
+this), but the consumer had none — it threw, exited, and relied on
+Docker's restart backoff to come back. Two services built to survive the
+same failure, handling it two different ways for no principled reason.
+Fixed by giving the consumer the same in-process reconnect-with-backoff
+pattern; verified by restarting RabbitMQ again afterward and confirming
+the consumer container never restarts, it just logs its own retries.
+
+All six were decisions once found (each fix follows directly from either
 the stated delivery guarantee — idempotent-by-id everywhere, including the
-DLQ — or from what the metric is supposed to mean), not accidents that
-shipped unnoticed: all four are called out in SPEC.md's changelog with the
-incident writeup, and the first two have a regression note in
-[AGENTS.md](./AGENTS.md) telling a future editor not to reintroduce them.
+DLQ — or from the plain expectation that one bad request/connection
+shouldn't take down a whole service), not accidents that shipped unnoticed:
+all six are called out in SPEC.md's changelog (v2-v5) with the incident
+writeup, and several have a regression note in [AGENTS.md](./AGENTS.md)
+telling a future editor not to reintroduce them.
 
 ## Gate results
 
@@ -367,18 +389,19 @@ Capacity Notes for why that's a different number from the 2M seeded for the
 full demo). Last recorded run:
 
 ```
-$ docker compose up -d --build && make seed && make verify
+$ docker compose down -v && docker compose up -d --build && make seed && make verify
 ...
-G1 resume after kill ............ PASS (killed at 68000 / checkpoint survived at 69000 / resumed from there, not from 0 / backfill completed at 200000)
+G1 resume after kill ............ PASS (killed at 70000 / checkpoint survived at 70500 / resumed from there, not from 0 / backfill completed at 200000)
 G2 no duplicates ................ PASS (200000 source / 200000 in Elasticsearch / 0 discrepancy despite 3 kill-restarts total)
-G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.42% — no busy-loop; 18s after ES came back, source=200167 == elasticsearch=200167, including 152 rows written WHILE ES was down; 0 lost)
+G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.54% — no busy-loop; 21s after ES came back, source=200188 == elasticsearch=200188, including 169 rows written WHILE ES was down; 0 lost)
 G4 partial batch failure ........ PASS (3 corrupt rows in → exactly 3 DLQ entries, other rows unaffected, all 3 replayed successfully after fixing source data)
 G5 observability ................ PASS (status/metrics/health/UI all reachable, all required fields present)
 ```
 
-This exact transcript is from a full from-scratch run: `docker compose down
--v`, then the three commands above with no manual intervention in between —
-the same sequence a grader would run.
+This exact transcript is from a full from-scratch run — `docker compose
+down -v`, then the commands above with no manual intervention in between,
+run again after the robustness hardening pass (SPEC.md v5 / deviations #5
+and #6) to confirm those fixes didn't regress any gate.
 
 All five gates passed on the last recorded run. G3 took three attempts to
 get right — not because the pipeline was wrong, but because the first two
