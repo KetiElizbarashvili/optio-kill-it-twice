@@ -13,6 +13,8 @@ seed: seed-bulk
 seed-bulk:
 	docker compose --profile tools run --rm seeder bulk --rows=$(ROWS) --batch=5000
 
+RATE ?= 20
+DURATION ?= 60
 seed-drip:
 	docker compose --profile tools run --rm seeder drip --rate=$(RATE) --duration=$(DURATION)
 

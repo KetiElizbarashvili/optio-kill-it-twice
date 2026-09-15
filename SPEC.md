@@ -83,19 +83,21 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
 
 ## 3. Scope (what's in v1 of the build)
 
-- [ ] Postgres source schema + seed script (`make seed`) generating ~2M rows
+- [x] Postgres source schema + seed script (`make seed`) generating ~2M rows
       across at least one table with realistic-enough columns to make search
       meaningful.
-- [ ] Pipeline service (NestJS) with two concurrent workers: backfill worker,
-      incremental worker. Shared checkpoint store.
-- [ ] Elasticsearch sink writer (bulk API, upsert semantics).
-- [ ] RabbitMQ event publisher (change events, one per row change).
-- [ ] At least one independent consumer of the RabbitMQ stream (separate
+- [x] Pipeline service (plain Node, not NestJS — see v2 changelog) with two
+      concurrent worker PROCESSES (not just concurrent loops in one
+      process — resolved open question below): backfill worker, incremental
+      worker. Shared checkpoint store (Postgres).
+- [x] Elasticsearch sink writer (bulk API, upsert semantics).
+- [x] RabbitMQ event publisher (change events, one per row change).
+- [x] At least one independent consumer of the RabbitMQ stream (separate
       process/container) — proves the event stream is a real fan-out point,
       not decoration.
-- [ ] DLQ: failed-row landing zone with enough context (source id, payload,
+- [x] DLQ: failed-row landing zone with enough context (source id, payload,
       failure reason, attempt count) to be replayed via a UI/CLI action.
-- [ ] Metrics + health endpoints (Prometheus-style `/metrics` + `/health`)
+- [x] Metrics + health endpoints (Prometheus-style `/metrics` + `/health`)
       feeding the UI and the verify script.
 - [ ] UI (React) — 4 panels: pipeline status, data browser, controls,
       failure simulation.
@@ -169,3 +171,19 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
      fixes the underlying data (or bug) and then replays — replaying the
      original bad payload verbatim would just fail again, identically,
      forever.
+
+- v3 (writing `verify.sh`): the first full run of the gate script itself
+  caught a flaw in the G3 test's own design, not in the pipeline. G3
+  initially stopped Elasticsearch right after G1/G2 had already run
+  backfill to completion and drained incremental to near-zero lag — i.e.
+  with both workers sitting idle. An idle worker never calls the ES client
+  at all, so it never notices ES is down, so the `es_up` gauge just froze
+  at whatever it last was. The gate "passed" for the wrong reason (nothing
+  was actually being tested) before I added an assertion that would have
+  caught this — the freeze showed up as `es_up=1` unchanged and, worse, a
+  later assertion timeout waiting for recovery signal. Fixed by starting a
+  live drip of changes (`seeder drip`) before stopping Elasticsearch, so
+  the incremental worker is actively attempting writes — and therefore
+  actually blocked and actually recovering — during the window being
+  measured. Recorded here because it's the same category of mistake as
+  v2's items: something that looked right until it was actually run.
