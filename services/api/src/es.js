@@ -13,6 +13,7 @@ async function searchRecords({ q, status, country, page = 1, limit = 25 }) {
     index: INDEX,
     from: (page - 1) * limit,
     size: limit,
+    track_total_hits: true, // ES caps hits.total at 10000 otherwise
     sort: [{ updated_at: 'desc' }],
     query: must.length ? { bool: { must } } : { match_all: {} },
   });
