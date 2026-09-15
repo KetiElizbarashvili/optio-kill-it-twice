@@ -1,0 +1,11 @@
+{
+  "name": "kill-it-twice-consumer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/index.js",
+  "dependencies": {
+    "amqplib": "^0.10.4",
+    "ioredis": "^5.4.1"
+  }
+}

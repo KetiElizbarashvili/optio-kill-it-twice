@@ -1,0 +1,148 @@
+name: kill-it-twice
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: killittwice
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  seeder:
+    build: ./scripts
+    profiles: ["tools"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/killittwice
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pipeline-backfill:
+    build: ./services/pipeline
+    environment:
+      MODE: backfill
+      PORT: "9100"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/killittwice
+      ES_URL: http://elasticsearch:9200
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      BATCH_SIZE: "500"
+    ports:
+      - "9100:9100"
+    depends_on:
+      postgres: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  pipeline-incremental:
+    build: ./services/pipeline
+    environment:
+      MODE: incremental
+      PORT: "9100"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/killittwice
+      ES_URL: http://elasticsearch:9200
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+      BATCH_SIZE: "500"
+      POLL_INTERVAL_MS: "1500"
+    ports:
+      - "9101:9100"
+    depends_on:
+      postgres: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  consumer:
+    build: ./services/consumer
+    environment:
+      PORT: "9200"
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "9210:9200"
+    depends_on:
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  api:
+    build: ./services/api
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/killittwice
+      ES_URL: http://elasticsearch:9200
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_MGMT_URL: http://rabbitmq:15672
+      PIPELINE_BACKFILL_URL: http://pipeline-backfill:9100
+      PIPELINE_INCREMENTAL_URL: http://pipeline-incremental:9100
+      CONSUMER_URL: http://consumer:9200
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres: { condition: service_healthy }
+      elasticsearch: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  ui:
+    build: ./ui
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  esdata:

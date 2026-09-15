@@ -129,3 +129,43 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
 ## Changelog
 
 - v1 (initial): this document.
+
+- v2 (during backend build, before UI): four changes, all discovered by
+  actually running the system, not by re-reading the spec:
+
+  1. **Dropped NestJS for the pipeline/consumer/api services**, using plain
+     Node.js instead. Rationale: the pipeline and consumer are background
+     workers with no HTTP surface of their own beyond a `/health` and
+     `/metrics` endpoint — they don't benefit from Nest's HTTP-centric DI
+     container. Once two of three services didn't need Nest, using it only
+     for the API would have meant two different conventions for no real
+     gain. This is a scope-speed trade-off, not a correctness one — see
+     README "Where AI deviated from spec" for the honest version of why.
+
+  2. **`updated_at`/`created_at` changed from `TIMESTAMPTZ` to
+     `TIMESTAMPTZ(3)`.** Found by actually running the incremental worker:
+     Postgres stores microsecond precision by default, but the watermark
+     round-trips through a JS `Date` (millisecond precision) on its way
+     into and back out of `pipeline_checkpoint`. Comparing a
+     millisecond-truncated watermark against microsecond-precision rows
+     made `updated_at > last_watermark` true forever for any row sharing
+     that truncated millisecond — an actual infinite reprocessing loop,
+     caught because rows_processed climbed to 75x the seeded row count
+     instead of converging. Truncating the column itself to millisecond
+     precision makes the round-trip lossless. See README "Where AI deviated
+     from spec" for the full incident.
+
+  3. **DLQ upserts on `(source_record_id, sink)` instead of inserting
+     unconditionally.** Backfill and incremental both scan forward
+     independently and can both observe the same failing row (e.g. a row
+     written after backfill's cursor position, which both workers' next
+     batch will pick up). Without a unique constraint, one bad row produced
+     two DLQ entries instead of one — undercutting the exact "3 rows in, 3
+     rows in DLQ" story gate G4 is supposed to demonstrate.
+
+  4. **DLQ replay re-reads the current source row, not the frozen bad
+     payload.** The original design replayed whatever JSON was captured at
+     failure time. That's wrong: the entire point of a DLQ is that someone
+     fixes the underlying data (or bug) and then replays — replaying the
+     original bad payload verbatim would just fail again, identically,
+     forever.
