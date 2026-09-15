@@ -108,7 +108,7 @@ ADR-3.
   unique row count, duplicates-skipped count equals the rest.
 
 We did not build exactly-once delivery. That would require either
-transactional outbox semantics spanning Postgrs + Elasticsearch + RabbitMQ
+transactional outbox semantics spanning Postgres + Elasticsearch + RabbitMQ
 in one atomic unit (a distributed transaction we have no infrastructure
 for) or idempotency receipts on every consumer forever (unbounded storage).
 At-least-once + idempotent-by-construction sinks gets the same *observable*
@@ -223,10 +223,27 @@ the 2M-row scenario is the one-time capacity benchmark below, not something
 re-run on every gate check. Reasoning for both numbers is in SPEC.md 2.5.
 
 **Measured throughput** (single backfill worker, batch size 500,
-docker-compose on a single machine, both sinks local):
+docker-compose on a single machine, both sinks local, `make seed ROWS=2000000`
+then a fresh backfill from empty sinks):
 
-*(Filled in from the verify.sh / manual runs in this repo — see the gate
-results table below for the exact figures from the last recorded run.)*
+- **Seed load** (Postgres only, `UNNEST`-array bulk insert): ~185,000–200,000
+  rows/sec. Not the bottleneck by two orders of magnitude.
+- **Backfill (source → both sinks)**: 2,000,000 rows in **214s wall clock**
+  (including container startup) = **~9,300 rows/sec average**, with the
+  rolling 30s-window gauge fluctuating between ~7,900 and ~11,400 rows/sec
+  over the run (visible live in the UI's Status tab, or via
+  `curl localhost:9100/status`).
+- **Incremental**, scanning the same growing table concurrently, tracked
+  backfill almost exactly (2,000,000 rows processed, ending at `lag_seconds:
+  0` — fully caught up the moment backfill stopped producing new watermarks).
+- **Consumer**: 2,000,000 unique rows processed, exactly 2,000,000 duplicates
+  correctly skipped — the expected 1:1 ratio, since backfill and incremental
+  both independently scan and publish the full table (see "Where AI deviated
+  from spec" #1 dynamics) — verified via `GET /api/status` after the run,
+  not asserted.
+- **Elasticsearch**: exactly 2,000,000 documents after the run — verified
+  with `GET /records/_count` against the live index, matching the Postgres
+  source count exactly.
 
 **Bottleneck:** the sink writes are synchronous and sequential per batch —
 Elasticsearch bulk request, then wait for its response, then RabbitMQ
@@ -278,8 +295,12 @@ overhead at the cost of a bigger single unit of retry-on-failure.
 
 ## Where AI deviated from spec
 
-Two concrete, verified incidents (full technical detail also in SPEC.md's
-v2 changelog, written at the time each was found):
+Four concrete, verified incidents — the required minimum was two; the other
+two showed up while building `verify.sh` and are included because they're
+the same category of mistake (something that looked right until it was
+actually run), just caught one layer up, in the test rather than the
+pipeline. Full technical detail also in SPEC.md's changelog (v2-v4), written
+at the time each was found:
 
 **1. Infinite incremental-reprocessing loop from timestamp truncation.**
 SPEC v1 called for a plain `TIMESTAMPTZ` `updated_at` column. While manually
@@ -314,20 +335,55 @@ concurrency (two independent workers scanning the same rows) was wrong —
 the deviation was in the code, caught by running gate G4 for real rather
 than asserting it would work.
 
-Both were decisions once found (the fix in each case follows directly from
+**3. G3's own test was vacuous on the first attempt.** `verify.sh` initially
+stopped Elasticsearch right after backfill had completed and incremental had
+drained — i.e. with both workers idle. An idle worker never calls the
+Elasticsearch client, so it never notices the outage, so the gate "passed"
+without exercising anything. Caught by reading the actual gate output
+(`es_up=1` unchanged through the "outage," then a timeout waiting for a
+recovery signal that was never going to come) rather than the exit code
+alone. Fixed by driving live writes (`seeder drip`) through the outage
+window so the worker is actually attempting — and therefore actually
+blocked, and actually recovering — during the measured window.
+
+**4. `lag_seconds` measured the wrong thing.** It was `now - last processed
+change`, which grows forever on a fully-caught-up, healthy worker with no
+new data — the opposite of what "lag" should communicate to an operator.
+Caught by watching the number climb past 50s+ in `verify.sh` output on a
+worker that had already processed every row. Fixed to mean "age of the
+oldest *unprocessed* row," reading 0 when there's no backlog.
+
+All four were decisions once found (each fix follows directly from either
 the stated delivery guarantee — idempotent-by-id everywhere, including the
-DLQ), not accidents that shipped unnoticed: both are called out in SPEC.md
-v2 with the incident writeup, and both have a regression note in
+DLQ — or from what the metric is supposed to mean), not accidents that
+shipped unnoticed: all four are called out in SPEC.md's changelog with the
+incident writeup, and the first two have a regression note in
 [AGENTS.md](./AGENTS.md) telling a future editor not to reintroduce them.
 
 ## Gate results
 
-Run `make verify` to reproduce. Last recorded run:
+Run `make verify` to reproduce (uses `VERIFY_ROWS=200000` by default — see
+Capacity Notes for why that's a different number from the 2M seeded for the
+full demo). Last recorded run:
+
+```
+G1 resume after kill ............ PASS (killed at 65500 / checkpoint survived at 66000 / resumed from there, not from 0 / backfill completed at 200000)
+G2 no duplicates ................ PASS (200000 source / 200000 in Elasticsearch / 0 discrepancy despite 3 kill-restarts)
+G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.46% — no busy-loop; 18s after ES came back, source=200188 == elasticsearch=200188, including 174 rows written WHILE ES was down; 0 lost)
+G4 partial batch failure ........ PASS (3 corrupt rows in → exactly 3 DLQ entries, other rows unaffected, all 3 replayed successfully after fixing source data)
+G5 observability ................ PASS (status/metrics/health/UI all reachable, all required fields present)
+```
+
+All five gates passed on the last recorded run. G3 took three attempts to
+get right — not because the pipeline was wrong, but because the first two
+versions of the *test* were (see SPEC.md v3/v4 and "Where AI deviated from
+spec" #3-4 for the honest account of what those attempts got wrong and
+why). G1, G2, G4, and G5 passed on the first real run.
 
 | Gate | Description | Result |
 |------|--------------|--------|
-| G1 | Crash recovery (kill mid-backfill) | *(filled in below)* |
-| G2 | No duplicates after repeated kills | *(filled in below)* |
-| G3 | Sink outage (real `docker stop` on Elasticsearch) | *(filled in below)* |
-| G4 | Partial batch failure (3/N bad rows) | *(filled in below)* |
-| G5 | Observability (status/metrics/UI, no code reading) | *(filled in below)* |
+| G1 | Crash recovery (kill mid-backfill) | PASS |
+| G2 | No duplicates after repeated kills | PASS |
+| G3 | Sink outage (real `docker stop` on Elasticsearch, under live write load) | PASS |
+| G4 | Partial batch failure (3/N bad rows) | PASS |
+| G5 | Observability (status/metrics/UI, no code reading) | PASS |

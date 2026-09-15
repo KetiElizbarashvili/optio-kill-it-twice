@@ -99,10 +99,10 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
       failure reason, attempt count) to be replayed via a UI/CLI action.
 - [x] Metrics + health endpoints (Prometheus-style `/metrics` + `/health`)
       feeding the UI and the verify script.
-- [ ] UI (React) — 4 panels: pipeline status, data browser, controls,
+- [x] UI (React) — 4 panels: pipeline status, data browser, controls,
       failure simulation.
-- [ ] `verify.sh` / `make verify` — scripted, automated proof for G1–G5.
-- [ ] `docker-compose.yml` bringing up: Postgres, RabbitMQ, Elasticsearch,
+- [x] `verify.sh` / `make verify` — scripted, automated proof for G1–G5.
+- [x] `docker-compose.yml` bringing up: Postgres, RabbitMQ, Elasticsearch,
       Redis, pipeline service, consumer service, API, UI.
 
 ## 4. Explicitly out of scope (v1) — see README "what I didn't build"
@@ -187,3 +187,18 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
   actually blocked and actually recovering — during the window being
   measured. Recorded here because it's the same category of mistake as
   v2's items: something that looked right until it was actually run.
+
+- v4 (same verify.sh session): fixing v3 exposed a second, independent bug
+  in `lag_seconds`. It was computed as `now - last_watermark`, i.e. "wall
+  clock time since the last change was processed." On a static dataset
+  (no drip) that number grows forever even though the worker is fully
+  caught up with nothing left to do — a healthy, idle worker reads as
+  falling further and further behind the longer nothing happens, which is
+  the opposite of what an operator needs from a lag metric. Fixed to mean
+  what "lag" should mean: 0 when there is no pending backlog, and
+  otherwise the age of the *oldest unprocessed* row (`rows[0].updated_at`
+  from the fetched batch), not the checkpoint's age. This is a G5
+  (observability) correctness bug, not a data-safety one — nothing was
+  lost or duplicated — but a misleading health metric is exactly the kind
+  of thing G5 exists to catch, so it's recorded with the same weight as
+  v2/v3.
