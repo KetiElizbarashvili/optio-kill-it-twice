@@ -230,3 +230,21 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
      by restarting RabbitMQ again afterward: the consumer container now
      stays up (`docker compose ps` never shows a restart) and logs its own
      retry/backoff instead of disappearing and reappearing.
+
+- v6 (post-hoc, human-directed): the original seed generator used an
+  8-city, 7-country hand-picked list. Asked directly whether this "fake
+  data" should be swapped for something real, and the honest answer split
+  in two: real *personal* data (actual people's names/emails, even from a
+  public source) has no business being fabricated into synthetic "customer
+  activity" and committed to a public repo — that's a privacy/reputation
+  risk with zero upside, not a realism upgrade. Real *geographic* data
+  (cities, countries) carries none of that risk — a city or country isn't
+  a person or a company with a reputation to misrepresent — and using the
+  real, standard reference table instead of an 8-item list is a strict
+  improvement to the demo's realism. Landed on: `all-the-cities` +
+  `iso-3166-1` (public GeoNames-derived data + the ISO country table) for
+  1,400+ real (city, country) pairs; names stay a small generic
+  placeholder pool (not sourced from real individuals, same as "Jane Doe"
+  everywhere); company names stay obviously fictional (the "Acme Corp"
+  convention) rather than naming real businesses in invented records. See
+  `scripts/geo.js`.

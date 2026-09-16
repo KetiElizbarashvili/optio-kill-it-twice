@@ -222,6 +222,17 @@ mid-flight without making every `make verify` run take several minutes;
 the 2M-row scenario is the one-time capacity benchmark below, not something
 re-run on every gate check. Reasoning for both numbers is in SPEC.md 2.5.
 
+**Where the seeded data comes from:** names are a small generic placeholder
+pool (the "Jane Doe" convention — not sourced from or resembling real
+individuals) and company names are deliberately fictional (the "Acme Corp"
+convention). City/country come from real public reference data
+(`all-the-cities` + `iso-3166-1`, 1,400+ real (city, country) pairs) rather
+than a hand-picked list — geography is a fact with no privacy or reputation
+stake, unlike a person's or a company's name, so there was no reason to
+fabricate it once a real, standard source was one `npm install` away. See
+SPEC.md v6 for the reasoning split between "real geography: fine" and
+"real people/companies: not happening in a public repo."
+
 **Measured throughput** (single backfill worker, batch size 500,
 docker-compose on a single machine, both sinks local, `make seed ROWS=2000000`
 then a fresh backfill from empty sinks):
@@ -391,17 +402,17 @@ full demo). Last recorded run:
 ```
 $ docker compose down -v && docker compose up -d --build && make seed && make verify
 ...
-G1 resume after kill ............ PASS (killed at 70000 / checkpoint survived at 70500 / resumed from there, not from 0 / backfill completed at 200000)
+G1 resume after kill ............ PASS (killed at 61000 / checkpoint survived at 61500 / resumed from there, not from 0 / backfill completed at 200000)
 G2 no duplicates ................ PASS (200000 source / 200000 in Elasticsearch / 0 discrepancy despite 3 kill-restarts total)
-G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.54% — no busy-loop; 21s after ES came back, source=200188 == elasticsearch=200188, including 169 rows written WHILE ES was down; 0 lost)
+G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.53% — no busy-loop; 20s after ES came back, source=200176 == elasticsearch=200176, including 167 rows written WHILE ES was down; 0 lost)
 G4 partial batch failure ........ PASS (3 corrupt rows in → exactly 3 DLQ entries, other rows unaffected, all 3 replayed successfully after fixing source data)
 G5 observability ................ PASS (status/metrics/health/UI all reachable, all required fields present)
 ```
 
 This exact transcript is from a full from-scratch run — `docker compose
 down -v`, then the commands above with no manual intervention in between,
-run again after the robustness hardening pass (SPEC.md v5 / deviations #5
-and #6) to confirm those fixes didn't regress any gate.
+run a third time after the real-geography seed data change (SPEC.md v6) to
+confirm it didn't regress any gate.
 
 All five gates passed on the last recorded run. G3 took three attempts to
 get right — not because the pipeline was wrong, but because the first two

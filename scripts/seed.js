@@ -16,14 +16,19 @@
  *     verify.sh to drive gate G4 deterministically.
  */
 const { Client } = require('pg');
+const { CITY_COUNTRY_PAIRS } = require('./geo');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/killittwice';
 
-const FIRST = ['Nino', 'Giorgi', 'Ana', 'Luka', 'Mariam', 'Sandro', 'Tekla', 'Beka', 'Salome', 'Nika', 'Elene', 'Data', 'Keti', 'Levan', 'Tamar', 'Zura'];
+// Names stay a small generic placeholder pool (like "Jane Doe" — not
+// sourced from or resembling any real individual's record). City/country
+// come from real, public geographic reference data instead of a
+// hand-picked list — see geo.js for why. Company names stay obviously
+// fictional (the "Acme Corp" convention) rather than naming real
+// businesses in synthetic "customer activity" records.
+const FIRST = ['Nino', 'Giorgi', 'Ana', 'Luka', 'Mariam', 'Sandro', 'Tekla', 'Beka', 'Salome', 'Nika', 'Elene', 'Data', 'Levan', 'Tamar', 'Zura', 'Irakli'];
 const LAST = ['Beridze', 'Kapanadze', 'Lomidze', 'Chkheidze', 'Gelashvili', 'Tsiklauri', 'Maisuradze', 'Kiknadze', 'Abashidze', 'Sharashenidze'];
-const COMPANY = ['Optio', 'Vector Labs', 'Northpeak', 'BlueOrbit', 'Ferrum', 'Kappa Systems', 'Rustavi Tech', 'Delta Forge', 'Cobalt', 'Skyline Data'];
-const CITY = ['Tbilisi', 'Batumi', 'Kutaisi', 'Rustavi', 'Gori', 'Zugdidi', 'Telavi', 'Poti'];
-const COUNTRY = ['Georgia', 'Armenia', 'Azerbaijan', 'Turkey', 'Germany', 'Poland', 'Ukraine'];
+const COMPANY = ['Vector Labs', 'Northpeak', 'BlueOrbit', 'Ferrum Systems', 'Kappa Works', 'Rustavi Forge', 'Delta Grove', 'Cobalt & Co', 'Skyline Data', 'Anchorpoint'];
 const STATUS = ['active', 'inactive', 'pending'];
 const TAGS = ['vip', 'trial', 'enterprise', 'churned', 'lead', 'partner', 'internal'];
 
@@ -40,12 +45,13 @@ function tagsLiteral(tags) { return `{${tags.join(',')}}`; }
 function genRow(i) {
   const first = pick(FIRST);
   const last = pick(LAST);
+  const place = pick(CITY_COUNTRY_PAIRS);
   return {
     name: `${first} ${last}`,
     email: `${first}.${last}.${i}@example.com`.toLowerCase(),
     company: pick(COMPANY),
-    city: pick(CITY),
-    country: pick(COUNTRY),
+    city: place.city,
+    country: place.country,
     status: pick(STATUS),
     tags: pickSome(TAGS, 3),
     amount: randomAmount(),
