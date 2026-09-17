@@ -22,5 +22,11 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count }),
     }),
+  simulateDrip: (count) =>
+    req('/simulate/drip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count }),
+    }),
   simulateOutage: (sink, action) => req(`/simulate/outage/${sink}/${action}`, { method: 'POST' }),
 };

@@ -176,6 +176,12 @@ app.post('/api/simulate/corrupt', wrap(async (req, res) => {
   res.json({ ok: true, ids });
 }));
 
+app.post('/api/simulate/drip', wrap(async (req, res) => {
+  const count = Math.min(500, parseInt(req.body?.count || '20', 10));
+  const result = await db.generateSourceChanges(count);
+  res.json({ ok: true, ...result });
+}));
+
 app.post('/api/simulate/outage/:sink/:action', wrap(async (req, res) => {
   const { sink, action } = req.params;
   if (!['elasticsearch', 'rabbitmq'].includes(sink)) return res.status(400).json({ error: 'bad sink' });

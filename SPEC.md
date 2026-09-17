@@ -248,3 +248,30 @@ matching the gate's own G4 scenario (3 bad rows in a 500-row batch).
   everywhere); company names stay obviously fictional (the "Acme Corp"
   convention) rather than naming real businesses in invented records. See
   `scripts/geo.js`.
+
+- v7 (final line-by-line pass against the assignment text, before
+  submission): re-reading the brief's own wording turned up two gaps that
+  every gate still passing had not caught, because neither is a gate:
+
+  1. **The UI never exposed "generate source changes."** The Simulation
+     panel's required list is "turn off receivers, inject a corrupted
+     row, generate source changes" (section 5) — the third item had no UI
+     control at all; the only way to make new changes was the CLI
+     (`make seed-drip`). Added `POST /api/simulate/drip` (a bounded,
+     synchronous burst of random insert/update/soft-delete against
+     Postgres — deliberately not a background timed loop, so a button
+     click has an immediate, visible, finite effect) and a matching
+     "Generate source changes" card. Also made the corrupt-row count
+     configurable instead of hardcoded to 3, since "Controls" separately
+     lists "parameter setting" as an example.
+
+  2. **`verify.sh`'s own report format didn't match the brief's example.**
+     The brief shows `G1 resume after kill ... PASS (killed at X /
+     resumed at Y, 0 lost)`; the script printed `PASS G1 <verbose
+     detail>` — functionally equivalent, clear either way, but a
+     needless mismatch against a format the brief spelled out explicitly.
+     Reformatted to match: gate id + short label + dot-padding + verdict
+     + a compact parenthetical, with the fuller detail kept as a second,
+     inline line printed while that gate runs (so nothing was lost,
+     just reorganized). Re-ran `make verify` after both changes: all 5
+     gates still pass.

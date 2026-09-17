@@ -84,6 +84,21 @@ per-document Elasticsearch bulk-item rejections — bad data, not an outage
 catches consumer-side processing failures on the event-stream leg. See
 ADR-3.
 
+## UI
+
+Four tabs at http://localhost:5173, mapping directly to the spec's four
+required functions:
+
+| Required function | Tab | What's there |
+|---|---|---|
+| Pipeline status | **Status** | Backfill progress %, incremental lag, per-worker throughput, DLQ pending count, Elasticsearch/RabbitMQ/consumer health — polled every 2s. This is G5's visual half. |
+| Data browsing | **Data browser** | Search/filter (name, email, company, status, country) against the live Elasticsearch index, paginated, with a record detail view. Auto-refreshes every 4s, so an incremental change shows up without reloading. |
+| Control | **Controls & DLQ** | Pause/resume backfill and incremental independently; DLQ table with a working Replay action (re-reads the current source row, not the frozen bad payload — see "Where AI deviated from spec"). |
+| Simulation | **Simulate failures** | Inject *N* corrupt rows (configurable count) to drive G4; toggle a software fault-injection flag for an Elasticsearch or RabbitMQ outage without touching Docker (see ADR-5); generate a configurable burst of random source inserts/updates/soft-deletes directly against Postgres, so incremental sync has something new to pick up on demand instead of waiting for the CLI drip. |
+
+Not required, and not built: authentication, or a polished production-grade
+visual design (see "What I didn't build").
+
 ## Delivery guarantee
 
 **At-least-once delivery, effectively-once at both sinks.**
@@ -402,17 +417,23 @@ full demo). Last recorded run:
 ```
 $ docker compose down -v && docker compose up -d --build && make seed && make verify
 ...
-G1 resume after kill ............ PASS (killed at 61000 / checkpoint survived at 61500 / resumed from there, not from 0 / backfill completed at 200000)
-G2 no duplicates ................ PASS (200000 source / 200000 in Elasticsearch / 0 discrepancy despite 3 kill-restarts total)
-G3 sink outage ................... PASS (es_up=0 detected during outage, CPU 0.53% — no busy-loop; 20s after ES came back, source=200176 == elasticsearch=200176, including 167 rows written WHILE ES was down; 0 lost)
-G4 partial batch failure ........ PASS (3 corrupt rows in → exactly 3 DLQ entries, other rows unaffected, all 3 replayed successfully after fixing source data)
-G5 observability ................ PASS (status/metrics/health/UI all reachable, all required fields present)
+==================================================================
+ RESULTS
+==================================================================
+G1 resume after kill ..................... PASS (killed at 71000 / resumed at 71500, 0 lost)
+G2 no duplicates ......................... PASS (200000 source / 200000 sink / 0 dupes (after 3 kill-restarts))
+G3 sink outage ........................... PASS (15s down, 0 lost, recovered in 17s (CPU 0.01%, no busy-loop))
+G4 partial batch failure ................. PASS (3 corrupt rows isolated to DLQ, 0 other rows lost, 3/3 replayed)
+G5 observability ......................... PASS (status/metrics/health/UI all reachable)
+==================================================================
+All gates passed.
 ```
 
 This exact transcript is from a full from-scratch run — `docker compose
-down -v`, then the commands above with no manual intervention in between,
-run a third time after the real-geography seed data change (SPEC.md v6) to
-confirm it didn't regress any gate.
+down -v`, then the commands above with no manual intervention in between —
+run again after adding the UI's "generate source changes" control and
+reformatting `verify.sh`'s report to more closely match this document's
+own example output, to confirm neither regressed any gate.
 
 All five gates passed on the last recorded run. G3 took three attempts to
 get right — not because the pipeline was wrong, but because the first two

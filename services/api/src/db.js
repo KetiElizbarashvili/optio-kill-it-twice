@@ -79,6 +79,45 @@ async function insertCorruptRows(count = 3) {
   return ids;
 }
 
+const STATUS = ['active', 'inactive', 'pending'];
+function randomAmount() { return (Math.random() * 10000).toFixed(2); }
+function pick(arr) { return arr[(Math.random() * arr.length) | 0]; }
+
+// UI-triggered version of what `make seed-drip` does from the CLI — the
+// "generate source changes" control the spec's Simulation panel calls for.
+// A synchronous burst (not a timed background loop) so a button click has
+// an immediate, bounded, visible effect rather than kicking off state the
+// UI would then need to track and let the user stop.
+async function generateSourceChanges(count = 20) {
+  let inserted = 0, updated = 0, deleted = 0;
+  for (let i = 0; i < count; i++) {
+    const op = Math.random();
+    if (op < 0.5) {
+      const name = `${pick(FIRST)} ${pick(LAST)}`;
+      await pool.query(
+        `INSERT INTO records (name, email, company, city, country, status, tags, amount)
+         VALUES ($1, $2, 'SimCo', 'Tbilisi', 'Georgia', $3, '{simulated}', $4)`,
+        [name, `sim.drip.${Date.now()}.${i}@example.com`, pick(STATUS), randomAmount()]
+      );
+      inserted++;
+    } else if (op < 0.9) {
+      const { rowCount } = await pool.query(
+        `UPDATE records SET status = $1, amount = $2, version = version + 1, updated_at = now()
+         WHERE id = (SELECT id FROM records WHERE deleted_at IS NULL ORDER BY random() LIMIT 1)`,
+        [pick(STATUS), randomAmount()]
+      );
+      updated += rowCount;
+    } else {
+      const { rowCount } = await pool.query(
+        `UPDATE records SET deleted_at = now(), updated_at = now(), version = version + 1
+         WHERE id = (SELECT id FROM records WHERE deleted_at IS NULL ORDER BY random() LIMIT 1)`
+      );
+      deleted += rowCount;
+    }
+  }
+  return { inserted, updated, deleted };
+}
+
 module.exports = {
   pool,
   getCheckpoints,
@@ -92,4 +131,5 @@ module.exports = {
   markDlqReplayed,
   bumpDlqAttempt,
   insertCorruptRows,
+  generateSourceChanges,
 };

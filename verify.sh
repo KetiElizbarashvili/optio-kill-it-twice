@@ -19,8 +19,9 @@ RESULTS=()
 
 jget() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" 2>/dev/null; }
 
-pass() { RESULTS+=("PASS|$1|$2"); echo "  -> PASS: $2"; }
-fail() { RESULTS+=("FAIL|$1|$2"); echo "  -> FAIL: $2"; }
+# pass/fail <gate> <label> <short summary for the final table> <verbose detail printed inline now>
+pass() { RESULTS+=("PASS|$1|$2|$3"); echo "  -> PASS: $4"; }
+fail() { RESULTS+=("FAIL|$1|$2|$3"); echo "  -> FAIL: $4"; }
 
 wait_for() { # wait_for <label> <timeout_s> <shell_cond_as_string>
   local label=$1 timeout=$2 cond=$3 waited=0
@@ -70,7 +71,7 @@ for i in $(seq 1 120); do
   sleep 1
 done
 if [ -z "$LAST_ID" ] || [ "$LAST_ID" -lt "$TARGET" ] 2>/dev/null; then
-  fail G1 "backfill never reached 30% within timeout (last_id=$LAST_ID) — cannot test kill mid-run"
+  fail G1 "resume after kill" "backfill never reached 30% in time" "backfill never reached 30% within timeout (last_id=$LAST_ID) — cannot test kill mid-run"
 else
   KILL_AT=$LAST_ID
   echo "  killing pipeline-backfill at last_id=$KILL_AT"
@@ -87,9 +88,13 @@ else
   FINAL_BF=$(status_json)
   BF_LAST_ID=$(echo "$FINAL_BF" | jget "d['backfill']['last_id']")
   if [ "$RESUMED_AT" -ge "$CP_AT_KILL" ] 2>/dev/null && [ "$BF_LAST_ID" = "$MAX_ID" ]; then
-    pass G1 "killed at $KILL_AT / checkpoint survived at $CP_AT_KILL / resumed from there, not from 0 / backfill completed at $BF_LAST_ID"
+    pass G1 "resume after kill" \
+      "killed at $KILL_AT / resumed at $CP_AT_KILL, 0 lost" \
+      "killed at $KILL_AT / checkpoint survived at $CP_AT_KILL / resumed from there, not from 0 / backfill completed at $BF_LAST_ID"
   else
-    fail G1 "resume did not pick up from checkpoint correctly (checkpoint=$CP_AT_KILL, resumed_at=$RESUMED_AT, final=$BF_LAST_ID)"
+    fail G1 "resume after kill" \
+      "checkpoint=$CP_AT_KILL but resumed=$RESUMED_AT — did not pick up correctly" \
+      "resume did not pick up from checkpoint correctly (checkpoint=$CP_AT_KILL, resumed_at=$RESUMED_AT, final=$BF_LAST_ID)"
   fi
 fi
 
@@ -115,9 +120,11 @@ SRC=$(source_live_count)
 ESN=$(es_count)
 echo "  source (live) rows = $SRC, elasticsearch doc count = $ESN"
 if [ "$SRC" = "$ESN" ]; then
-  pass G2 "$SRC source rows / $ESN in Elasticsearch / 0 discrepancy despite 3 kill-restarts total (backfill x1, incremental x2) — idempotent upsert-by-id absorbed every replay"
+  pass G2 "no duplicates" \
+    "$SRC source / $ESN sink / 0 dupes (after 3 kill-restarts)" \
+    "$SRC source rows / $ESN in Elasticsearch / 0 discrepancy despite 3 kill-restarts total (backfill x1, incremental x2) — idempotent upsert-by-id absorbed every replay"
 else
-  fail G2 "mismatch: source=$SRC vs elasticsearch=$ESN"
+  fail G2 "no duplicates" "mismatch: source=$SRC vs elasticsearch=$ESN" "mismatch: source=$SRC vs elasticsearch=$ESN"
 fi
 
 # ---------------------------------------------------------------- G3 ----
@@ -174,9 +181,13 @@ FINAL_ES=$(es_count)
 CHANGED=$((FINAL_SRC - SRC_BEFORE_OUTAGE))
 echo "  live writes during test: $CHANGED row(s) net change. final source=$FINAL_SRC, elasticsearch=$FINAL_ES"
 if [ "$INC_UP" = "0" ] && [ "$FINAL_SRC" = "$FINAL_ES" ]; then
-  pass G3 "es_up=0 detected during outage (CPU during outage: $CPU_PCT, no busy-loop); ${RECOVER_S}s after Elasticsearch came back the pipeline had drained and source ($FINAL_SRC) == elasticsearch ($FINAL_ES) again, including the $CHANGED row(s) written WHILE Elasticsearch was down; 0 lost"
+  pass G3 "sink outage" \
+    "15s down, 0 lost, recovered in ${RECOVER_S}s (CPU ${CPU_PCT}, no busy-loop)" \
+    "es_up=0 detected during outage (CPU during outage: $CPU_PCT, no busy-loop); ${RECOVER_S}s after Elasticsearch came back the pipeline had drained and source ($FINAL_SRC) == elasticsearch ($FINAL_ES) again, including the $CHANGED row(s) written WHILE Elasticsearch was down; 0 lost"
 else
-  fail G3 "outage handling incomplete: es_up_during_outage=$INC_UP source=$FINAL_SRC es=$FINAL_ES"
+  fail G3 "sink outage" \
+    "es_up_during_outage=$INC_UP source=$FINAL_SRC es=$FINAL_ES" \
+    "outage handling incomplete: es_up_during_outage=$INC_UP source=$FINAL_SRC es=$FINAL_ES"
 fi
 
 # ---------------------------------------------------------------- G4 ----
@@ -200,9 +211,13 @@ for rid in $IDS; do
 done
 echo "  replayed $REPLAYED/3 after fixing source data"
 if [ "$DLQ_DELTA" = "3" ] && [ "$REPLAYED" = "3" ]; then
-  pass G4 "3 corrupt rows in a batch -> exactly 3 DLQ entries, all other rows unaffected (whole batch NOT rolled back), all 3 successfully replayed after fixing source data"
+  pass G4 "partial batch failure" \
+    "3 corrupt rows isolated to DLQ, 0 other rows lost, 3/3 replayed" \
+    "3 corrupt rows in a batch -> exactly 3 DLQ entries, all other rows unaffected (whole batch NOT rolled back), all 3 successfully replayed after fixing source data"
 else
-  fail G4 "expected delta=3 replayed=3, got delta=$DLQ_DELTA replayed=$REPLAYED"
+  fail G4 "partial batch failure" \
+    "expected delta=3 replayed=3, got delta=$DLQ_DELTA replayed=$REPLAYED" \
+    "expected delta=3 replayed=3, got delta=$DLQ_DELTA replayed=$REPLAYED"
 fi
 
 # ---------------------------------------------------------------- G5 ----
@@ -221,9 +236,13 @@ curl -sf $API/health >/dev/null || OK=0
 UI_OK=0
 curl -sf http://localhost:5173/ >/dev/null && UI_OK=1
 if [ "$OK" = "1" ] && [ "$UI_OK" = "1" ]; then
-  pass G5 "status endpoint exposes progress/lag/DLQ-count/throughput/health; pipeline /metrics reachable on both workers; UI reachable at :5173"
+  pass G5 "observability" \
+    "status/metrics/health/UI all reachable" \
+    "status endpoint exposes progress/lag/DLQ-count/throughput/health; pipeline /metrics reachable on both workers; UI reachable at :5173"
 else
-  fail G5 "one or more observability surfaces missing (fields_ok=$OK ui_ok=$UI_OK)"
+  fail G5 "observability" \
+    "one or more observability surfaces missing (fields_ok=$OK ui_ok=$UI_OK)" \
+    "one or more observability surfaces missing (fields_ok=$OK ui_ok=$UI_OK)"
 fi
 
 # ------------------------------------------------------------- REPORT ---
@@ -233,8 +252,13 @@ echo " RESULTS"
 echo "=================================================================="
 FAIL_COUNT=0
 for r in "${RESULTS[@]}"; do
-  IFS='|' read -r verdict gate desc <<< "$r"
-  printf "%-4s %-45s %s\n" "$verdict" "$gate" "$desc"
+  IFS='|' read -r verdict gate label short <<< "$r"
+  prefix="$gate $label "
+  width=42
+  dotcount=$((width - ${#prefix}))
+  [ "$dotcount" -lt 3 ] && dotcount=3
+  dots=$(printf '.%.0s' $(seq 1 "$dotcount"))
+  printf "%s%s %s (%s)\n" "$prefix" "$dots" "$verdict" "$short"
   [ "$verdict" = "FAIL" ] && FAIL_COUNT=$((FAIL_COUNT+1))
 done
 echo "=================================================================="
